@@ -1,0 +1,11 @@
+# Web
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+slowapi>=0.1.9
+python-dotenv>=1.0.0
+
+# Install paddlepaddle separately first (see README). CPU example:
+#   python -m pip install paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+# Then:
+paddleocr[doc-parser]>=3.0.0
