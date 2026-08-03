@@ -34,8 +34,7 @@ class Settings:
     host: str
     port: int
     device: str
-    lang: str
-    ocr_version: str | None
+    pipeline_version: str
     ocr_api_key: str
     rate_limit_ocr: str
     rate_limit_ocr_table: str
@@ -63,18 +62,16 @@ def load_settings() -> Settings:
     allowed_hosts_raw = _env("ALLOWED_HOSTS", "localhost,127.0.0.1") or "localhost,127.0.0.1"
     allowed_hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
 
-    lang = _env("PADDLEOCR_LANG", "en") or "en"
-    ocr_version = _env("PADDLEOCR_OCR_VERSION")
-    device = _env("PADDLEOCR_DEVICE", "cpu") or "cpu"
-    model_label = f"paddleocr:{ocr_version or 'PP-OCRv6'}:{lang}"
+    device = _env("PADDLEOCR_DEVICE", "gpu:0") or "gpu:0"
+    pipeline_version = _env("PADDLEOCR_VL_PIPELINE_VERSION", "v1.6") or "v1.6"
+    model_label = f"paddleocr-vl:{pipeline_version}"
 
     return Settings(
         env=_env("ENV", "development") or "development",
         host=_env("HOST", "127.0.0.1") or "127.0.0.1",
         port=_env_int("PORT", 8090),
         device=device,
-        lang=lang,
-        ocr_version=ocr_version,
+        pipeline_version=pipeline_version,
         ocr_api_key=api_key,
         rate_limit_ocr=_env("RATE_LIMIT_OCR", "30/minute") or "30/minute",
         rate_limit_ocr_table=_env("RATE_LIMIT_OCR_TABLE", "15/minute") or "15/minute",

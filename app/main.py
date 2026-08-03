@@ -105,7 +105,7 @@ async def health(request: Request):
         "status": "ok",
         "paddleocr": True,
         "device": settings.device,
-        "lang": settings.lang,
+        "pipeline_version": settings.pipeline_version,
         "model": settings.model_label,
     }
 
