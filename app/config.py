@@ -35,6 +35,8 @@ class Settings:
     port: int
     device: str
     pipeline_version: str
+    vl_rec_backend: str | None
+    vl_rec_server_url: str | None
     ocr_api_key: str
     rate_limit_ocr: str
     rate_limit_ocr_table: str
@@ -51,6 +53,10 @@ class Settings:
     def docs_enabled(self) -> bool:
         return not self.is_production
 
+    @property
+    def uses_vlm_server(self) -> bool:
+        return bool(self.vl_rec_backend and self.vl_rec_server_url)
+
 
 def load_settings() -> Settings:
     api_key = _env("OCR_API_KEY")
@@ -64,7 +70,21 @@ def load_settings() -> Settings:
 
     device = _env("PADDLEOCR_DEVICE", "gpu:0") or "gpu:0"
     pipeline_version = _env("PADDLEOCR_VL_PIPELINE_VERSION", "v1.6") or "v1.6"
+    # In-process by default. Set PADDLEOCR_VL_REC_BACKEND=vllm-server only when a local
+    # vLLM container is running. Empty / unset = in-process (no Docker required).
+    # Use os.getenv so an explicit empty value is not replaced by a non-empty default.
+    raw_backend = os.getenv("PADDLEOCR_VL_REC_BACKEND")
+    if raw_backend is None or raw_backend.strip() == "":
+        vl_rec_backend = None
+        vl_rec_server_url = None
+    else:
+        vl_rec_backend = raw_backend.strip()
+        vl_rec_server_url = _env(
+            "PADDLEOCR_VL_REC_SERVER_URL", "http://localhost:8118/v1"
+        )
     model_label = f"paddleocr-vl:{pipeline_version}"
+    if vl_rec_backend:
+        model_label = f"{model_label}+{vl_rec_backend}"
 
     return Settings(
         env=_env("ENV", "development") or "development",
@@ -72,6 +92,8 @@ def load_settings() -> Settings:
         port=_env_int("PORT", 8090),
         device=device,
         pipeline_version=pipeline_version,
+        vl_rec_backend=vl_rec_backend,
+        vl_rec_server_url=vl_rec_server_url,
         ocr_api_key=api_key,
         rate_limit_ocr=_env("RATE_LIMIT_OCR", "30/minute") or "30/minute",
         rate_limit_ocr_table=_env("RATE_LIMIT_OCR_TABLE", "15/minute") or "15/minute",

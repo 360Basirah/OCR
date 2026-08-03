@@ -107,6 +107,8 @@ async def health(request: Request):
         "device": settings.device,
         "pipeline_version": settings.pipeline_version,
         "model": settings.model_label,
+        "vl_rec_backend": settings.vl_rec_backend or "in-process",
+        "vl_rec_server_url": settings.vl_rec_server_url,
     }
 
 
@@ -118,6 +120,12 @@ async def ocr(
     _api_key: str = Depends(require_api_key),
 ):
     data, mime = await _read_upload(file)
+    logger.info(
+        "POST /ocr filename=%s mime=%s bytes=%s",
+        file.filename,
+        mime,
+        len(data),
+    )
     try:
         result = recognize_text(data, mime=mime)
     except HTTPException:
@@ -125,6 +133,11 @@ async def ocr(
     except Exception as exc:
         logger.exception("ocr_failed")
         raise HTTPException(status_code=502, detail=f"OCR failed: {exc}") from exc
+    logger.info(
+        "POST /ocr ok duration_ms=%s line_count=%s",
+        result.get("durationMs"),
+        result.get("lineCount"),
+    )
     return result
 
 
@@ -136,6 +149,12 @@ async def ocr_table(
     _api_key: str = Depends(require_api_key),
 ):
     data, mime = await _read_upload(file)
+    logger.info(
+        "POST /ocr-table filename=%s mime=%s bytes=%s",
+        file.filename,
+        mime,
+        len(data),
+    )
     try:
         result = recognize_table(data, mime=mime)
     except HTTPException:
@@ -143,7 +162,13 @@ async def ocr_table(
     except Exception as exc:
         logger.exception("ocr_table_failed")
         raise HTTPException(status_code=502, detail=f"Table OCR failed: {exc}") from exc
+    logger.info(
+        "POST /ocr-table ok duration_ms=%s line_count=%s",
+        result.get("durationMs"),
+        result.get("lineCount"),
+    )
     return result
+
 
 
 @app.exception_handler(413)

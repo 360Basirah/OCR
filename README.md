@@ -80,7 +80,26 @@ curl -Method POST http://127.0.0.1:8090/ocr `
 4. Keep port `8090` private (VPN / internal network / RunPod private IP). Do not expose publicly.
 5. Prefer reverse-proxy / client timeouts **≥ 120–180s** — VL is heavier than PP-OCRv6 (Basirah sends one page image per request).
 
-Optional later: accelerate with a separate vLLM server via `vl_rec_backend` without changing Basirah.
+### Optional local vLLM (faster VL-1.6)
+
+By default the service runs **in-process** on GPU (no Docker). For faster VL decoding, optionally run a local vLLM server (Docker + NVIDIA GPU; not supported as a native Windows pip install):
+
+```bash
+docker run --rm --gpus all --network host \
+  ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-genai-vllm-server:latest-nvidia-gpu \
+  paddleocr genai_server --model_name PaddleOCR-VL-1.6-0.9B --host 0.0.0.0 --port 8118 --backend vllm
+```
+
+On Docker Desktop for Windows, `--network host` may not work; publish the port instead (`-p 8118:8118`).
+
+Then set in `.env`:
+
+```env
+PADDLEOCR_VL_REC_BACKEND=vllm-server
+PADDLEOCR_VL_REC_SERVER_URL=http://localhost:8118/v1
+```
+
+Leave both empty (default) for in-process Paddle.
 
 ## Basirah wiring
 
@@ -110,6 +129,8 @@ PADDLEOCR_API_KEY=your-secret
 | `ENV` | `development` | `production` disables `/docs` |
 | `PADDLEOCR_DEVICE` | `gpu:0` | e.g. `cpu` for debug only |
 | `PADDLEOCR_VL_PIPELINE_VERSION` | `v1.6` | Passed to `PaddleOCRVL(pipeline_version=...)` |
+| `PADDLEOCR_VL_REC_BACKEND` | *(empty)* | Empty = in-process; `vllm-server` when genai container is running |
+| `PADDLEOCR_VL_REC_SERVER_URL` | *(empty)* | e.g. `http://localhost:8118/v1` when using vLLM |
 | `RATE_LIMIT_OCR` | `30/minute` | |
 | `RATE_LIMIT_OCR_TABLE` | `15/minute` | |
 | `RATE_LIMIT_GLOBAL` | `60/minute` | |

@@ -16,20 +16,32 @@ _vl: Any | None = None
 def _build_vl():
     from paddleocr import PaddleOCRVL
 
-    return PaddleOCRVL(
-        pipeline_version=settings.pipeline_version,
-        device=settings.device,
-        use_doc_orientation_classify=True,
-        use_doc_unwarping=False,
-    )
+    kwargs: dict[str, Any] = {
+        "pipeline_version": settings.pipeline_version,
+        "device": settings.device,
+        "use_doc_orientation_classify": True,
+        "use_doc_unwarping": False,
+    }
+    # Local vLLM accelerates VL recognition; images stay on localhost (not sent to cloud).
+    if settings.uses_vlm_server:
+        kwargs["vl_rec_backend"] = settings.vl_rec_backend
+        kwargs["vl_rec_server_url"] = settings.vl_rec_server_url
+
+    return PaddleOCRVL(**kwargs)
 
 
 def warm_engines() -> None:
     global _vl
+    # Surface PaddleOCR / PaddleX progress in the uvicorn console.
+    for name in ("ppocr", "paddlex", "paddleocr"):
+        logging.getLogger(name).setLevel(logging.INFO)
+
     logger.info(
-        "Loading PaddleOCR-VL pipeline_version=%s device=%s",
+        "Loading PaddleOCR-VL pipeline_version=%s device=%s backend=%s server=%s",
         settings.pipeline_version,
         settings.device,
+        settings.vl_rec_backend or "in-process",
+        settings.vl_rec_server_url or "-",
     )
     _vl = _build_vl()
     logger.info("OCR engine ready model=%s", settings.model_label)
@@ -160,36 +172,107 @@ def _write_temp_upload(data: bytes, mime: str) -> Path:
         return Path(tmp.name)
 
 
+def _text_preview(text: str, limit: int = 240) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1] + "…"
+
+
 def _recognize(image_bytes: bytes, mime: str, model_suffix: str = "") -> dict[str, Any]:
     started = time.perf_counter()
     tmp_path: Path | None = None
+    logger.info(
+        "ocr_start mime=%s bytes=%s model=%s backend=%s device=%s",
+        mime,
+        len(image_bytes),
+        settings.model_label + model_suffix,
+        settings.vl_rec_backend or "in-process",
+        settings.device,
+    )
     try:
+        t0 = time.perf_counter()
         tmp_path = _write_temp_upload(image_bytes, mime)
+        logger.info(
+            "ocr_stage=write_temp path=%s elapsed_ms=%s",
+            tmp_path.name,
+            int((time.perf_counter() - t0) * 1000),
+        )
+
+        t1 = time.perf_counter()
         vl = get_vl()
+        logger.info(
+            "ocr_stage=engine_ready elapsed_ms=%s "
+            "(pipeline: orientation → layout → VL recognition → markdown)",
+            int((time.perf_counter() - t1) * 1000),
+        )
+
+        t2 = time.perf_counter()
+        logger.info("ocr_stage=predict_begin path=%s", tmp_path.name)
         results = vl.predict(str(tmp_path))
+        predict_ms = int((time.perf_counter() - t2) * 1000)
+        result_count = len(results) if results is not None else 0
+        logger.info(
+            "ocr_stage=predict_done results=%s elapsed_ms=%s",
+            result_count,
+            predict_ms,
+        )
+
+        t3 = time.perf_counter()
         chunks: list[str] = []
-        for res in results or []:
+        for idx, res in enumerate(results or []):
             text = _extract_vl_text(res)
             if text:
                 chunks.append(text)
+                logger.info(
+                    "ocr_stage=extract_page page=%s chars=%s preview=%r",
+                    idx,
+                    len(text),
+                    _text_preview(text),
+                )
+            else:
+                logger.info("ocr_stage=extract_page page=%s chars=0 (empty)", idx)
 
         text = "\n\n".join(chunks).strip()
         model = settings.model_label if not model_suffix else f"{settings.model_label}{model_suffix}"
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        line_count = _count_lines(text)
+        logger.info(
+            "ocr_done model=%s duration_ms=%s predict_ms=%s extract_ms=%s "
+            "line_count=%s chars=%s",
+            model,
+            duration_ms,
+            predict_ms,
+            int((time.perf_counter() - t3) * 1000),
+            line_count,
+            len(text),
+        )
         return {
             "text": text,
             "model": model,
-            "durationMs": int((time.perf_counter() - started) * 1000),
-            "lineCount": _count_lines(text),
+            "durationMs": duration_ms,
+            "lineCount": line_count,
         }
+    except Exception:
+        logger.exception(
+            "ocr_failed mime=%s bytes=%s elapsed_ms=%s",
+            mime,
+            len(image_bytes),
+            int((time.perf_counter() - started) * 1000),
+        )
+        raise
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
+            logger.info("ocr_stage=cleanup temp removed")
 
 
 def recognize_text(image_bytes: bytes, mime: str = "image/png") -> dict[str, Any]:
+    logger.info("recognize_text requested")
     return _recognize(image_bytes, mime)
 
 
 def recognize_table(image_bytes: bytes, mime: str = "image/png") -> dict[str, Any]:
     # VL-1.6 already handles tables/layout; same pipeline as plain OCR.
+    logger.info("recognize_table requested (same VL pipeline)")
     return _recognize(image_bytes, mime, model_suffix="+vl")
