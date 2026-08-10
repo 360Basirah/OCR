@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -11,6 +12,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import settings
+from app.gpu_gate import run_on_gpu
 from app.middleware import MaxBodySizeMiddleware, RequestContextMiddleware, SecurityHeadersMiddleware
 from app.ocr_engine import recognize_table, recognize_text, warm_engines
 from app.security import rate_limit_key, require_api_key
@@ -23,6 +25,9 @@ logger = logging.getLogger("paddleocr")
 
 limiter = Limiter(key_func=rate_limit_key, default_limits=[settings.rate_limit_global])
 
+OcrPipeline = Literal["vl", "ocr"]
+TablePipeline = Literal["structure", "vl"]
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -32,7 +37,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Basirah PaddleOCR Service",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
     docs_url="/docs" if settings.docs_enabled else None,
     redoc_url="/redoc" if settings.docs_enabled else None,
@@ -98,6 +103,10 @@ async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
     return data, mime
 
 
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", "-")
+
+
 @app.get("/health")
 @limiter.limit("120/minute")
 async def health(request: Request):
@@ -109,6 +118,14 @@ async def health(request: Request):
         "model": settings.model_label,
         "vl_rec_backend": settings.vl_rec_backend or "in-process",
         "vl_rec_server_url": settings.vl_rec_server_url,
+        "max_concurrent": settings.max_concurrent,
+        "use_doc_unwarping": settings.use_doc_unwarping,
+        "structure_lang": settings.structure_lang,
+        "warm": {
+            "vl": settings.warm_vl,
+            "ocr": settings.warm_ocr,
+            "structure": settings.warm_structure,
+        },
     }
 
 
@@ -117,25 +134,39 @@ async def health(request: Request):
 async def ocr(
     request: Request,
     file: UploadFile = File(...),
+    pipeline: OcrPipeline = Query(
+        "vl",
+        description="vl = PaddleOCR-VL-1.6 (default, max accuracy); ocr = PP-OCRv6 medium",
+    ),
     _api_key: str = Depends(require_api_key),
 ):
     data, mime = await _read_upload(file)
+    req_id = _request_id(request)
     logger.info(
-        "POST /ocr filename=%s mime=%s bytes=%s",
+        "POST /ocr request_id=%s pipeline=%s filename=%s mime=%s bytes=%s",
+        req_id,
+        pipeline,
         file.filename,
         mime,
         len(data),
     )
     try:
-        result = recognize_text(data, mime=mime)
+        result, queue_wait_ms = await run_on_gpu(
+            recognize_text, data, mime=mime, pipeline=pipeline
+        )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("ocr_failed")
+        logger.exception("ocr_failed request_id=%s", req_id)
         raise HTTPException(status_code=502, detail=f"OCR failed: {exc}") from exc
+
+    result = {**result, "queueWaitMs": queue_wait_ms, "requestId": req_id}
     logger.info(
-        "POST /ocr ok duration_ms=%s line_count=%s",
+        "POST /ocr ok request_id=%s pipeline=%s duration_ms=%s queue_wait_ms=%s line_count=%s",
+        req_id,
+        result.get("pipeline"),
         result.get("durationMs"),
+        queue_wait_ms,
         result.get("lineCount"),
     )
     return result
@@ -146,29 +177,42 @@ async def ocr(
 async def ocr_table(
     request: Request,
     file: UploadFile = File(...),
+    pipeline: TablePipeline = Query(
+        "structure",
+        description="structure = PP-StructureV3 (default); vl = PaddleOCR-VL-1.6",
+    ),
     _api_key: str = Depends(require_api_key),
 ):
     data, mime = await _read_upload(file)
+    req_id = _request_id(request)
     logger.info(
-        "POST /ocr-table filename=%s mime=%s bytes=%s",
+        "POST /ocr-table request_id=%s pipeline=%s filename=%s mime=%s bytes=%s",
+        req_id,
+        pipeline,
         file.filename,
         mime,
         len(data),
     )
     try:
-        result = recognize_table(data, mime=mime)
+        result, queue_wait_ms = await run_on_gpu(
+            recognize_table, data, mime=mime, pipeline=pipeline
+        )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("ocr_table_failed")
+        logger.exception("ocr_table_failed request_id=%s", req_id)
         raise HTTPException(status_code=502, detail=f"Table OCR failed: {exc}") from exc
+
+    result = {**result, "queueWaitMs": queue_wait_ms, "requestId": req_id}
     logger.info(
-        "POST /ocr-table ok duration_ms=%s line_count=%s",
+        "POST /ocr-table ok request_id=%s pipeline=%s duration_ms=%s queue_wait_ms=%s line_count=%s",
+        req_id,
+        result.get("pipeline"),
         result.get("durationMs"),
+        queue_wait_ms,
         result.get("lineCount"),
     )
     return result
-
 
 
 @app.exception_handler(413)

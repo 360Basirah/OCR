@@ -8,5 +8,5 @@ python-dotenv>=1.0.0
 # Install paddlepaddle-gpu separately first (see README). CUDA 12.6 example:
 #   python -m pip install paddlepaddle-gpu==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 # Then:
-# PaddleOCR-VL-1.6 requires paddleocr[doc-parser] >= 3.6.0
-paddleocr[doc-parser]>=3.6.0
+# VL-1.6 needs doc-parser; PP-OCRv6 medium ships with paddleocr >= 3.7
+paddleocr[doc-parser]>=3.7.0

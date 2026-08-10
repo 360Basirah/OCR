@@ -1,18 +1,39 @@
 # Basirah PaddleOCR Service
 
-Private FastAPI microservice that runs [PaddleOCR-VL-1.6](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html) for document OCR (text + tables/layout). Basirah Node calls this over HTTP; OpenAI still does structured JSON extraction.
+Private FastAPI microservice for high-accuracy document OCR. Basirah Node calls this over HTTP; structured JSON extraction stays upstream.
 
-Runs **in-process on GPU** (RTX 4060 locally, RunPod in production). HTTP contract is unchanged from the previous PP-OCRv6 service.
+**Default engine:** [PaddleOCR-VL-1.6](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html) (max document accuracy).  
+**Optional:** [PP-OCRv6 medium](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/OCR.html) for classic line OCR; [PP-StructureV3](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PP-StructureV3.html) for tables/layout.
+
+Runs on GPU (RTX 4060 locally, RunPod in production). Inference runs **off the event loop** behind a GPU semaphore so concurrent requests do not stall each other or `/health`.
 
 ## Endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/health` | none | Liveness (no model inference) |
-| `POST` | `/ocr` | `X-API-Key` | Image → text / markdown |
-| `POST` | `/ocr-table` | `X-API-Key` | Image → layout/table markdown (same VL pipeline) |
+| `POST` | `/ocr` | `X-API-Key` | Image/PDF → text / markdown |
+| `POST` | `/ocr-table` | `X-API-Key` | Tables / layout → markdown |
 
 Multipart field name: `file` (JPEG / PNG / WebP / PDF, max 10MB by default).
+
+### Pipeline query params
+
+| Endpoint | Query | Engine |
+|----------|-------|--------|
+| `/ocr` | `pipeline=vl` (default) | PaddleOCR-VL-1.6 |
+| `/ocr` | `pipeline=ocr` | PP-OCRv6 medium det+rec |
+| `/ocr-table` | `pipeline=structure` (default) | PP-StructureV3 |
+| `/ocr-table` | `pipeline=vl` | PaddleOCR-VL-1.6 |
+
+Response fields include `text`, `model`, `pipeline`, `durationMs`, `lineCount`, `queueWaitMs`, `requestId`.
+
+## Concurrency model
+
+- Sync `predict()` runs in a thread pool (`asyncio.to_thread`).
+- `PADDLEOCR_MAX_CONCURRENT` (default `1`) gates GPU access.
+- Request A returns when A finishes; request B waits for the slot but does **not** delay A’s response.
+- `/health` stays responsive while OCR is running.
 
 ## Security
 
@@ -36,7 +57,7 @@ python -m venv .venv
 # 1) PaddlePaddle GPU wheel (required before paddleocr)
 python -m pip install paddlepaddle-gpu==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 
-# 2) App deps (needs paddleocr[doc-parser] >= 3.6.0 for VL-1.6)
+# 2) App deps (paddleocr[doc-parser] >= 3.7 for VL-1.6 + PP-OCRv6 medium)
 python -m pip install -U -r requirements.txt
 
 # 3) Env
@@ -48,39 +69,64 @@ copy .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8090
 ```
 
-Other CUDA indexes: see [PaddlePaddle install docs](https://www.paddlepaddle.org.cn/en/install/quick). CPU (`PADDLEOCR_DEVICE=cpu`) works for debugging only — VL is much slower than PP-OCRv6 on CPU.
+Other CUDA indexes: see [PaddlePaddle install docs](https://www.paddlepaddle.org.cn/en/install/quick). CPU (`PADDLEOCR_DEVICE=cpu`) works for debugging only — VL is slow on CPU.
 
-First startup downloads VL + layout models and warms the engine at boot.
+First startup downloads models and warms enabled engines (`PADDLEOCR_WARM_*`).
 
 ### Smoke checks
 
 ```powershell
 curl http://127.0.0.1:8090/health
-# Expect model: paddleocr-vl:v1.6, device: gpu:0
+# Expect model: paddleocr-vl:v1.6, max_concurrent: 1
 
 # Expect 401 without key
 curl -Method POST http://127.0.0.1:8090/ocr -Form "file=@passport.jpg"
 
-# With key
-curl -Method POST http://127.0.0.1:8090/ocr `
+# VL (default)
+curl -Method POST "http://127.0.0.1:8090/ocr?pipeline=vl" `
   -Headers @{ "X-API-Key" = "your-secret" } `
   -Form "file=@passport.jpg"
+
+# PP-OCRv6 medium
+curl -Method POST "http://127.0.0.1:8090/ocr?pipeline=ocr" `
+  -Headers @{ "X-API-Key" = "your-secret" } `
+  -Form "file=@passport.jpg"
+
+# Tables via StructureV3
+curl -Method POST "http://127.0.0.1:8090/ocr-table?pipeline=structure" `
+  -Headers @{ "X-API-Key" = "your-secret" } `
+  -Form "file=@statement.pdf"
 ```
+
+## Postman: parallel concurrency test
+
+1. Start uvicorn as above.
+2. Create two requests: `POST http://127.0.0.1:8090/ocr` with header `X-API-Key` and body form-data `file`.
+3. Run them **in parallel** (Collection Runner / two tabs / Newman). Optionally raise `RATE_LIMIT_OCR` if you hit 429.
+4. **Pass criteria**
+   - First response `durationMs` ≈ a solo OCR run (not ~2×).
+   - Second response has higher `queueWaitMs` when `PADDLEOCR_MAX_CONCURRENT=1`.
+   - First request’s wall time is **not** stretched to match the second.
+   - `GET /health` returns 200 while OCR is in flight.
+5. Accuracy spot-check: same image with `pipeline=vl` vs `pipeline=ocr`; use `/ocr-table` for multi-column tables.
+
+Server logs include `request_id`, `pipeline`, `queue_wait_ms`, and `duration_ms`.
 
 ## RunPod (production)
 
-1. Use a CUDA GPU pod (8GB+ VRAM is enough for the ~0.9B VL model; match or exceed the 4060 for comfortable headroom).
+1. Use a CUDA GPU pod (8GB+ VRAM for VL; more headroom if warming VL + OCR + Structure together).
 2. Build/run the GPU `Dockerfile` (CUDA 12.6 + `paddlepaddle-gpu`).
 3. Set runtime env:
    - `OCR_API_KEY` (must match Basirah `PADDLEOCR_API_KEY`)
    - `PADDLEOCR_DEVICE=gpu:0`
    - `PADDLEOCR_VL_PIPELINE_VERSION=v1.6`
+   - `PADDLEOCR_MAX_CONCURRENT=1` (raise only after measuring GPU headroom)
    - `ALLOWED_HOSTS` for your private hostname / IP
    - `ENV=production`
 4. Keep port `8090` private (VPN / internal network / RunPod private IP). Do not expose publicly.
-5. Prefer reverse-proxy / client timeouts **≥ 120–180s** — VL is heavier than PP-OCRv6 (Basirah sends one page image per request).
+5. Prefer reverse-proxy / client timeouts **≥ 120–180s**.
 
-### Optional local vLLM (faster VL-1.6)
+### Optional local vLLM (faster VL-1.6, same accuracy)
 
 By default the service runs **in-process** on GPU (no Docker). For faster VL decoding, optionally run a local vLLM server (Docker + NVIDIA GPU; not supported as a native Windows pip install):
 
@@ -117,7 +163,7 @@ PADDLEOCR_URL=http://host.docker.internal:8090
 PADDLEOCR_API_KEY=your-secret
 ```
 
-`PADDLEOCR_API_KEY` must equal this service’s `OCR_API_KEY`.
+`PADDLEOCR_API_KEY` must equal this service’s `OCR_API_KEY`. Existing clients keep working: `/ocr` defaults to `pipeline=vl`.
 
 ## Environment variables
 
@@ -129,9 +175,15 @@ PADDLEOCR_API_KEY=your-secret
 | `ENV` | `development` | `production` disables `/docs` |
 | `PADDLEOCR_DEVICE` | `gpu:0` | e.g. `cpu` for debug only |
 | `PADDLEOCR_VL_PIPELINE_VERSION` | `v1.6` | Passed to `PaddleOCRVL(pipeline_version=...)` |
+| `PADDLEOCR_MAX_CONCURRENT` | `1` | GPU job slots |
+| `PADDLEOCR_USE_DOC_UNWARPING` | `true` | Skew/warp correction for scans |
+| `PADDLEOCR_STRUCTURE_LANG` | `en` | PP-StructureV3 `lang` |
+| `PADDLEOCR_WARM_VL` | `true` | Load VL at startup |
+| `PADDLEOCR_WARM_OCR` | `true` | Load PP-OCRv6 medium at startup |
+| `PADDLEOCR_WARM_STRUCTURE` | `true` | Load StructureV3 at startup |
 | `PADDLEOCR_VL_REC_BACKEND` | *(empty)* | Empty = in-process; `vllm-server` when genai container is running |
 | `PADDLEOCR_VL_REC_SERVER_URL` | *(empty)* | e.g. `http://localhost:8118/v1` when using vLLM |
-| `RATE_LIMIT_OCR` | `30/minute` | |
+| `RATE_LIMIT_OCR` | `30/minute` | Raise for aggressive Postman parallel tests |
 | `RATE_LIMIT_OCR_TABLE` | `15/minute` | |
 | `RATE_LIMIT_GLOBAL` | `60/minute` | |
 | `MAX_UPLOAD_BYTES` | `10485760` | 10MB |
@@ -144,3 +196,4 @@ PADDLEOCR_API_KEY=your-secret
 - Never log API keys or OCR document text (access logs only request id / path / status / duration).
 - Pin `paddlepaddle-gpu` and `paddleocr` versions in deployments.
 - Ensure the CUDA wheel matches the RunPod image CUDA major version.
+- Warming all three pipelines uses more VRAM; set unused `PADDLEOCR_WARM_*=false` if needed.

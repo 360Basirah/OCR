@@ -28,6 +28,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _env(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     env: str
@@ -44,6 +51,12 @@ class Settings:
     max_upload_bytes: int
     allowed_hosts: list[str]
     model_label: str
+    max_concurrent: int
+    use_doc_unwarping: bool
+    structure_lang: str
+    warm_vl: bool
+    warm_ocr: bool
+    warm_structure: bool
 
     @property
     def is_production(self) -> bool:
@@ -86,6 +99,8 @@ def load_settings() -> Settings:
     if vl_rec_backend:
         model_label = f"{model_label}+{vl_rec_backend}"
 
+    structure_lang = (_env("PADDLEOCR_STRUCTURE_LANG", "en") or "en").lower()
+
     return Settings(
         env=_env("ENV", "development") or "development",
         host=_env("HOST", "127.0.0.1") or "127.0.0.1",
@@ -101,6 +116,12 @@ def load_settings() -> Settings:
         max_upload_bytes=_env_int("MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
         allowed_hosts=allowed_hosts,
         model_label=model_label,
+        max_concurrent=_env_int("PADDLEOCR_MAX_CONCURRENT", 1),
+        use_doc_unwarping=_env_bool("PADDLEOCR_USE_DOC_UNWARPING", True),
+        structure_lang=structure_lang,
+        warm_vl=_env_bool("PADDLEOCR_WARM_VL", True),
+        warm_ocr=_env_bool("PADDLEOCR_WARM_OCR", True),
+        warm_structure=_env_bool("PADDLEOCR_WARM_STRUCTURE", True),
     )
 
 
