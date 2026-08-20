@@ -36,7 +36,7 @@ ENV HOST=0.0.0.0 \
     PADDLEOCR_WARM_VL=true \
     PADDLEOCR_WARM_OCR=false \
     PADDLEOCR_WARM_STRUCTURE=false \
-    ALLOWED_HOSTS=localhost,127.0.0.1,*.api.runpod.ai
+    ALLOWED_HOSTS=*
 
 EXPOSE 8090
 

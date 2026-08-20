@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -28,10 +29,25 @@ limiter = Limiter(key_func=rate_limit_key, default_limits=[settings.rate_limit_g
 OcrPipeline = Literal["vl", "ocr"]
 TablePipeline = Literal["structure", "vl"]
 
+# RunPod LB: 204 = initializing, 200 = healthy. Warm models in background so HTTP listens immediately.
+_engines_ready = False
+_engines_error: str | None = None
+
+
+def _warm_in_background() -> None:
+    global _engines_ready, _engines_error
+    try:
+        warm_engines()
+        _engines_ready = True
+        logger.info("Background engine warm complete")
+    except Exception as exc:
+        _engines_error = str(exc)
+        logger.exception("Background engine warm failed: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    warm_engines()
+    threading.Thread(target=_warm_in_background, name="ocr-warm", daemon=True).start()
     yield
 
 
@@ -107,9 +123,28 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "-")
 
 
+@app.get("/ping")
+@limiter.limit("120/minute")
+async def ping(request: Request):
+    """RunPod load-balancer health check (default path)."""
+    if _engines_error:
+        return Response(status_code=500)
+    if not _engines_ready:
+        return Response(status_code=204)
+    return Response(status_code=200)
+
+
 @app.get("/health")
 @limiter.limit("120/minute")
 async def health(request: Request):
+    if _engines_error:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "detail": _engines_error},
+        )
+    if not _engines_ready:
+        return Response(status_code=204)
+
     return {
         "status": "ok",
         "paddleocr": True,
@@ -129,6 +164,13 @@ async def health(request: Request):
     }
 
 
+def _require_engines_ready() -> None:
+    if _engines_error:
+        raise HTTPException(status_code=503, detail=f"OCR engines failed to start: {_engines_error}")
+    if not _engines_ready:
+        raise HTTPException(status_code=503, detail="OCR engines are still warming up. Retry shortly.")
+
+
 @app.post("/ocr")
 @limiter.limit(settings.rate_limit_ocr)
 async def ocr(
@@ -140,6 +182,7 @@ async def ocr(
     ),
     _api_key: str = Depends(require_api_key),
 ):
+    _require_engines_ready()
     data, mime = await _read_upload(file)
     req_id = _request_id(request)
     logger.info(
@@ -183,6 +226,7 @@ async def ocr_table(
     ),
     _api_key: str = Depends(require_api_key),
 ):
+    _require_engines_ready()
     data, mime = await _read_upload(file)
     req_id = _request_id(request)
     logger.info(
