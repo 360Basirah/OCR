@@ -33,9 +33,12 @@ ENV HOST=0.0.0.0 \
     ENV=production \
     PADDLEOCR_DEVICE=gpu:0 \
     PADDLEOCR_VL_PIPELINE_VERSION=v1.6 \
-    ALLOWED_HOSTS=localhost,127.0.0.1
+    PADDLEOCR_WARM_VL=true \
+    PADDLEOCR_WARM_OCR=false \
+    PADDLEOCR_WARM_STRUCTURE=false \
+    ALLOWED_HOSTS=localhost,127.0.0.1,*.api.runpod.ai
 
 EXPOSE 8090
 
-# OCR_API_KEY must be provided at runtime
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+# OCR_API_KEY must be provided at runtime (RunPod endpoint env vars).
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8090}"]

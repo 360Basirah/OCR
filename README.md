@@ -112,19 +112,79 @@ curl -Method POST "http://127.0.0.1:8090/ocr-table?pipeline=structure" `
 
 Server logs include `request_id`, `pipeline`, `queue_wait_ms`, and `duration_ms`.
 
-## RunPod (production)
+## CI/CD (Jenkins + GHCR)
 
-1. Use a CUDA GPU pod (8GB+ VRAM for VL; more headroom if warming VL + OCR + Structure together).
-2. Build/run the GPU `Dockerfile` (CUDA 12.6 + `paddlepaddle-gpu`).
-3. Set runtime env:
-   - `OCR_API_KEY` (must match Basirah `PADDLEOCR_API_KEY`)
-   - `PADDLEOCR_DEVICE=gpu:0`
-   - `PADDLEOCR_VL_PIPELINE_VERSION=v1.6`
-   - `PADDLEOCR_MAX_CONCURRENT=1` (raise only after measuring GPU headroom)
-   - `ALLOWED_HOSTS` for your private hostname / IP
-   - `ENV=production`
-4. Keep port `8090` private (VPN / internal network / RunPod private IP). Do not expose publicly.
-5. Prefer reverse-proxy / client timeouts **≥ 120–180s**.
+Same pattern as Basirah backend/frontend:
+
+| Item | Value |
+|------|--------|
+| **Image** | `ghcr.io/360basirah/360basirah-ocr:latest` |
+| **Pipeline** | `OCR/Jenkinsfile` |
+| **Credentials** | Jenkins credential id `360Basirah` (GitHub PAT with `write:packages`) |
+| **Dockerfile** | `OCR/Dockerfile` (locked in this repo) |
+
+### Jenkins job setup
+
+1. Create a **Pipeline** job (e.g. `360basirah-ocr`).
+2. Point SCM to this OCR Git repo, branch `main`.
+3. Script path: `Jenkinsfile` (repo root).
+4. Ensure the Jenkins agent has Docker and can reach `ghcr.io`.
+5. On push to `main`, Jenkins builds and pushes:
+   - `ghcr.io/360basirah/360basirah-ocr:latest`
+   - `ghcr.io/360basirah/360basirah-ocr:build-<BUILD_NUMBER>`
+
+### Manual build (optional)
+
+```bash
+cd OCR
+echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
+docker build -t ghcr.io/360basirah/360basirah-ocr:latest .
+docker push ghcr.io/360basirah/360basirah-ocr:latest
+```
+
+Make the GHCR package **public** (or add RunPod registry credentials under **Secrets**) so RunPod can pull the image.
+
+## RunPod Serverless (production)
+
+1. **Serverless → Deploy a new endpoint → Deploy from a Docker image**
+2. **Endpoint type:** Load Balancer (keeps FastAPI `/ocr`, `/ocr-table`, multipart uploads)
+3. **Container image:** `ghcr.io/360basirah/360basirah-ocr:latest`
+4. **GPU:** RTX 4090 or L4 (24 GB recommended for VL)
+5. **Container disk:** 30–50 GB (model weights on first boot)
+6. **Expose HTTP port:** `8090`
+7. **Health check path:** `/health`
+8. **Workers:** `min=0`, `max=1` (or `min=1` for zero cold start)
+9. **Idle timeout:** `600` s; enable **FlashBoot**
+10. **Runtime env** (set in RunPod console, not in the image):
+    - `OCR_API_KEY` (must match Basirah `PADDLEOCR_API_KEY`)
+    - `PADDLEOCR_DEVICE=gpu:0`
+    - `PADDLEOCR_MAX_CONCURRENT=1`
+    - `ENV=production`
+    - `ALLOWED_HOSTS=localhost,127.0.0.1,*.api.runpod.ai` (already defaulted in Dockerfile)
+11. Endpoint URL: `https://<ENDPOINT_ID>.api.runpod.ai`
+
+RunPod requires `Authorization: Bearer <RUNPOD_API_KEY>` on every request; your app still requires `X-API-Key: <OCR_API_KEY>`.
+
+### Smoke test (RunPod)
+
+```bash
+curl -s "https://<ENDPOINT_ID>.api.runpod.ai/health" \
+  -H "Authorization: Bearer <RUNPOD_API_KEY>"
+
+curl -s -X POST "https://<ENDPOINT_ID>.api.runpod.ai/ocr" \
+  -H "Authorization: Bearer <RUNPOD_API_KEY>" \
+  -H "X-API-Key: <OCR_API_KEY>" \
+  -F "file=@test.png"
+```
+
+First request after scale-to-zero may take several minutes (GPU provision + model warm).
+
+### RunPod Pod (always-on alternative)
+
+1. Use the same GHCR image.
+2. Expose port `8090`.
+3. Connect via `https://<pod-id>-8090.proxy.runpod.net` (only `X-API-Key` needed, no RunPod Bearer on proxy).
+4. Prefer client timeouts **≥ 120–180s**.
 
 ### Optional local vLLM (faster VL-1.6, same accuracy)
 
