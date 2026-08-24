@@ -1,0 +1,67 @@
+# Build and push 360basirah-ocr to GitHub Container Registry.
+# Image: ghcr.io/<owner>/360basirah-ocr:latest|sha-...
+#
+# Uses GITHUB_TOKEN (packages: write). No extra secrets required.
+# Runs automatically on every push to main/master.
+
+name: Build and push Docker images
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-push-ocr:
+    name: OCR (PaddleOCR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=${{ env.REGISTRY }}/${OWNER}/360basirah-ocr" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+            type=raw,value=build-${{ github.run_number }}
+
+      - name: Build and push OCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=ocr
+          cache-to: type=gha,mode=max,scope=ocr
+          # OCR CUDA image is large; keep provenance off for simpler GHCR packages
+          provenance: false
+          sbom: false

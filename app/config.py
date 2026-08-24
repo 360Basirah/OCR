@@ -80,6 +80,9 @@ def load_settings() -> Settings:
 
     allowed_hosts_raw = _env("ALLOWED_HOSTS", "localhost,127.0.0.1") or "localhost,127.0.0.1"
     allowed_hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
+    # RunPod / proxies may send unexpected Host headers; "*" disables host filtering.
+    if "*" in allowed_hosts:
+        allowed_hosts = ["*"]
 
     device = _env("PADDLEOCR_DEVICE", "gpu:0") or "gpu:0"
     pipeline_version = _env("PADDLEOCR_VL_PIPELINE_VERSION", "v1.6") or "v1.6"
