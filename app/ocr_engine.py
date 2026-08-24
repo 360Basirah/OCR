@@ -16,6 +16,28 @@ _vl: Any | None = None
 _ocr: Any | None = None
 _structure: Any | None = None
 
+
+def _ensure_dynamic_paddle_mode() -> None:
+    """
+    Paddle can run in static graph mode, but PaddleOCR-VL may hit code paths
+    that are incompatible with static mode (e.g. logging `int(Tensor)`).
+
+    Force dynamic/eager mode before we instantiate any PaddleOCR pipelines.
+    """
+    try:
+        import paddle
+
+        if not paddle.in_dynamic_mode():
+            paddle.disable_static()
+            logger.info("Paddle forced into dynamic mode (disable_static).")
+    except Exception:
+        # If Paddle import fails, let the existing error surface later.
+        logger.exception("Failed to ensure Paddle dynamic mode.")
+
+
+# Important: do this at import time so it affects any background warm threads too.
+_ensure_dynamic_paddle_mode()
+
 OCR_MODEL_LABEL = "pp-ocrv6:medium"
 STRUCTURE_MODEL_LABEL = "pp-structurev3"
 
@@ -69,6 +91,9 @@ def warm_engines() -> None:
     # Surface PaddleOCR / PaddleX progress in the uvicorn console.
     for name in ("ppocr", "paddlex", "paddleocr"):
         logging.getLogger(name).setLevel(logging.INFO)
+
+    # Defensive: warm might run after other code initialized Paddle.
+    _ensure_dynamic_paddle_mode()
 
     if settings.warm_vl:
         logger.info(
