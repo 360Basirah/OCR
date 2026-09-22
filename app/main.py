@@ -5,7 +5,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -180,16 +180,27 @@ async def ocr(
         "vl",
         description="vl = PaddleOCR-VL-1.6 (default, max accuracy); ocr = PP-OCRv6 medium",
     ),
+    document_name: str | None = Form(
+        None,
+        description="Original PDF/image name from Basirah (for logs)",
+    ),
+    page_number: int | None = Form(
+        None,
+        description="1-based page number within the source PDF (for logs)",
+    ),
     _api_key: str = Depends(require_api_key),
 ):
     _require_engines_ready()
     data, mime = await _read_upload(file)
     req_id = _request_id(request)
+    doc_label = (document_name or file.filename or "unknown").strip() or "unknown"
+    page_label = str(page_number) if page_number is not None else "?"
     logger.info(
-        "POST /ocr request_id=%s pipeline=%s filename=%s mime=%s bytes=%s",
+        "POST /ocr start request_id=%s document=%s page=%s pipeline=%s mime=%s bytes=%s",
         req_id,
+        doc_label,
+        page_label,
         pipeline,
-        file.filename,
         mime,
         len(data),
     )
@@ -200,13 +211,22 @@ async def ocr(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("ocr_failed request_id=%s", req_id)
+        logger.exception(
+            "POST /ocr failed request_id=%s document=%s page=%s error=%s",
+            req_id,
+            doc_label,
+            page_label,
+            exc,
+        )
         raise HTTPException(status_code=502, detail=f"OCR failed: {exc}") from exc
 
     result = {**result, "queueWaitMs": queue_wait_ms, "requestId": req_id}
     logger.info(
-        "POST /ocr ok request_id=%s pipeline=%s duration_ms=%s queue_wait_ms=%s line_count=%s",
+        "POST /ocr complete request_id=%s document=%s page=%s pipeline=%s duration_ms=%s "
+        "queue_wait_ms=%s line_count=%s",
         req_id,
+        doc_label,
+        page_label,
         result.get("pipeline"),
         result.get("durationMs"),
         queue_wait_ms,
@@ -224,16 +244,27 @@ async def ocr_table(
         "structure",
         description="structure = PP-StructureV3 (default); vl = PaddleOCR-VL-1.6",
     ),
+    document_name: str | None = Form(
+        None,
+        description="Original PDF/image name from Basirah (for logs)",
+    ),
+    page_number: int | None = Form(
+        None,
+        description="1-based page number within the source PDF (for logs)",
+    ),
     _api_key: str = Depends(require_api_key),
 ):
     _require_engines_ready()
     data, mime = await _read_upload(file)
     req_id = _request_id(request)
+    doc_label = (document_name or file.filename or "unknown").strip() or "unknown"
+    page_label = str(page_number) if page_number is not None else "?"
     logger.info(
-        "POST /ocr-table request_id=%s pipeline=%s filename=%s mime=%s bytes=%s",
+        "POST /ocr-table start request_id=%s document=%s page=%s pipeline=%s mime=%s bytes=%s",
         req_id,
+        doc_label,
+        page_label,
         pipeline,
-        file.filename,
         mime,
         len(data),
     )
@@ -244,13 +275,22 @@ async def ocr_table(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("ocr_table_failed request_id=%s", req_id)
+        logger.exception(
+            "POST /ocr-table failed request_id=%s document=%s page=%s error=%s",
+            req_id,
+            doc_label,
+            page_label,
+            exc,
+        )
         raise HTTPException(status_code=502, detail=f"Table OCR failed: {exc}") from exc
 
     result = {**result, "queueWaitMs": queue_wait_ms, "requestId": req_id}
     logger.info(
-        "POST /ocr-table ok request_id=%s pipeline=%s duration_ms=%s queue_wait_ms=%s line_count=%s",
+        "POST /ocr-table complete request_id=%s document=%s page=%s pipeline=%s duration_ms=%s "
+        "queue_wait_ms=%s line_count=%s",
         req_id,
+        doc_label,
+        page_label,
         result.get("pipeline"),
         result.get("durationMs"),
         queue_wait_ms,
